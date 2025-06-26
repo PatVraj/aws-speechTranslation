@@ -1,0 +1,127 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  A serverless pipeline to transcribe and translate Indian political speeches with multi-language identification.
+
+Globals:
+  Function:
+    Timeout: 60
+    Runtime: python3.12
+    MemorySize: 256
+
+Resources:
+  # --- S3 Buckets for the pipeline workflow ---
+  RawMediaBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  TranscribedTextBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  FinalDataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # --- Lambda Function to Start Transcription ---
+  StartTranscriptionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/start_transcription/
+      Handler: app.lambda_handler
+      Environment:
+        Variables:
+          TRANSCRIBED_BUCKET_NAME: !Ref TranscribedTextBucket
+      Policies:
+        # Explicit policy to break the circular dependency
+        - Statement:
+            - Sid: S3ReadPolicy
+              Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource: !Sub "arn:aws:s3:::${RawMediaBucket}/*"
+            - Sid: TranscribePolicy
+              Effect: Allow
+              Action:
+                - transcribe:StartTranscriptionJob
+              Resource: '*'
+      Events:
+        FileUpload:
+          Type: S3
+          Properties:
+            Bucket: !Ref RawMediaBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .mp3
+                  - Name: suffix
+                    Value: .mp4
+                  - Name: suffix
+                    Value: .wav
+
+  # --- Lambda Function to Translate and Store Data ---
+  TranslateAndStoreFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/translate_store/
+      Handler: app.lambda_handler
+      Environment:
+        Variables:
+          FINAL_DATA_BUCKET: !Ref FinalDataBucket
+      Policies:
+        # Explicit policies to break the circular dependency
+        - Statement:
+            - Sid: S3ReadPolicy
+              Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource: !Sub "arn:aws:s3:::${TranscribedTextBucket}/*"
+            - Sid: S3WritePolicy
+              Effect: Allow
+              Action:
+                - s3:PutObject
+                - s3:GetObject
+              Resource: !Sub "arn:aws:s3:::${FinalDataBucket}/*"
+            - Sid: TranslatePolicy
+              Effect: Allow
+              Action:
+                - translate:TranslateText
+              Resource: '*'
+      Events:
+        TranscriptionComplete:
+          Type: S3
+          Properties:
+            Bucket: !Ref TranscribedTextBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .json
+
+Outputs:
+  RawMediaBucketName:
+    Description: "Bucket to upload raw speech audio/video files."
+    Value: !Ref RawMediaBucket
+  FinalDataBucketName:
+    Description: "Bucket containing the final CSV with transcriptions and translations."
+    Value: !Ref FinalDataBucket
